@@ -1,0 +1,12 @@
+# Ignore virtual environment folder
+venv/
+
+# Ignore python compiled files
+__pycache__/
+*.pyc
+
+# SAFETY: Ignore secrets with API keys
+.streamlit/secrets.toml
+
+# Ignore VS Code settings (optional, but good practice)
+.vscode/

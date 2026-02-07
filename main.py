@@ -3,9 +3,10 @@ import pandas as pd
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots # New import for advanced charts
 from data_loader import fetch_stock_data, get_company_info
-from news_manager import fetch_stock_news, filter_fake_news, analyze_sentiment 
+from news_manager import fetch_finnhub_news, process_news_with_finbert
 from feature_engine import add_technical_indicators # New Import
 from model_engine import StockPredictor
+import random 
 
 # --- Page Config (Dark Mode is default in Streamlit, but we can tweak layout) ---
 st.set_page_config(page_title="StockVision", layout="wide")
@@ -17,7 +18,7 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     ticker = st.text_input("Stock Ticker", "AAPL").upper()
     period = st.selectbox("History Period", ["1y", "2y", "5y", "max"], index=1)
-    st.info("💡 Tip: Try 'GOOGL', 'TSLA', or 'MSFT'")
+    st.info(" Tip: Try 'GOOGL', 'TSLA', or 'MSFT'")
 
 # --- Main Logic ---
 if ticker:
@@ -29,13 +30,14 @@ if ticker:
         # B. Get Company Info
         company_info = get_company_info(ticker)
         
-        # C. Get News & Sentiment
-        if "NEWS_API_KEY" in st.secrets:
-            api_key = st.secrets["NEWS_API_KEY"] 
-            raw_news = fetch_stock_news(ticker, api_key)
-            verified_news = filter_fake_news(raw_news)
-            sentiment_df = analyze_sentiment(verified_news)
+       # C. Get News & Sentiment (Finnhub + FinBERT)
+        if "FINNHUB_API_KEY" in st.secrets:
+            api_key = st.secrets["FINNHUB_API_KEY"]
+            with st.spinner("Fetching financial news & analyzing with FinBERT..."):
+                raw_news = fetch_finnhub_news(ticker, api_key)
+                sentiment_df = process_news_with_finbert(raw_news)
         else:
+            st.error("Finnhub API Key missing!")
             sentiment_df = None
 
         # D. Add Technical Indicators
@@ -61,7 +63,7 @@ if ticker:
         with col_head1:
             if company_info:
                 st.subheader(f"{company_info.get('longName', ticker)}")
-                st.caption(f"📍 {company_info.get('sector', 'N/A')} | {company_info.get('industry', 'N/A')}")
+                st.caption(f" {company_info.get('sector', 'N/A')} | {company_info.get('industry', 'N/A')}")
         
         with col_head2:
              # Display Current Price (Last Close)
@@ -109,30 +111,89 @@ if ticker:
             st.plotly_chart(fig, use_container_width=True)
 
         with tab2:
-            st.subheader("Market Sentiment Analysis")
+            st.subheader("Market Sentiment Analysis (FinBERT 🧠)")
+            st.caption("Using Deep Learning (FinBERT) to analyze financial news tone.")
+
             if sentiment_df is not None and not sentiment_df.empty:
+                # 1. Calculate Average Sentiment Score
                 avg_score = sentiment_df['sentiment_score'].mean()
                 
-                # Visual Gauge for Sentiment
+                # 2. Display the Gauge/Meter
                 col_sent1, col_sent2 = st.columns([1, 2])
                 with col_sent1:
-                     if avg_score > 0.05:
-                        st.success(f"🐂 Bullish ({avg_score:.2f})")
-                     elif avg_score < -0.05:
-                        st.error(f"🐻 Bearish ({avg_score:.2f})")
-                     else:
-                        st.warning(f"😐 Neutral ({avg_score:.2f})")
+                    # Logic for the "Bullish/Bearish" text
+                    if avg_score > 0.05:
+                        st.success(f"🐂 Bullish (Score: {avg_score:.2f})")
+                    elif avg_score < -0.05:
+                        st.error(f"🐻 Bearish (Score: {avg_score:.2f})")
+                    else:
+                        st.warning(f"😐 Neutral (Score: {avg_score:.2f})")
                 
                 with col_sent2:
-                    st.progress((avg_score + 1) / 2) # Normalize -1to1 -> 0to1 for progress bar
+                    # Normalize score (-1 to 1) -> (0 to 1) for the progress bar
+                    st.progress((avg_score + 1) / 2)
 
+                # 3. Display the News Articles (With Dynamic Images)
+                st.markdown("### 📰 Latest Financial News")
+
+                # --- CONFIGURATION ---
+                # Set this to TRUE if you want to ignore boring API logos and just show cool wallpapers
+                IGNORE_API_IMAGES = True
+                
+                # --- NEW: List of cool fallback images ---
+                # These are high-quality Unsplash images related to finance/tech
+                FALLBACK_IMAGES = [
+                    "https://wallpaperaccess.com/full/1393720.jpg", # Stock Chart
+                    "https://wallpapercave.com/wp/wp6988199.jpg", # Bull Market
+                    "https://wallpaperaccess.com/full/3561071.png", # Analytics
+                    "https://wallpapercave.com/wp/wp10338352.jpg", # Data Screen
+                    "https://wallpaperaccess.com/full/6048844.png", # Finance Math
+                    "https://img.freepik.com/premium-photo/green-bull-market-run-upward-presents-uptrend-stock-market-financial-business-concept-generative-ai_1423-7210.jpg?w=2000"  # Business Graph
+                ]
+
+                # We use 'enumerate' to get the index (0, 1, 2...) so we can cycle through images
                 for index, row in sentiment_df.iterrows():
                     with st.container():
-                        st.markdown(f"**[{row['label']}]** [{row['title']}]({row['url']})")
-                        st.caption(f"{row['source']} • {row['published']}")
-                        st.divider()
+                        col_img, col_text = st.columns([1, 3])
+                        
+                        # --- LEFT COLUMN: IMAGE ---
+                        with col_img:
+                            # Decide which image to show
+                            show_real_image = False
+                            
+                            # Only check for real image if we haven't disabled it
+                            if not IGNORE_API_IMAGES and row['image'] and row['image'].strip() != "":
+                                show_real_image = True
+
+                            if show_real_image:
+                                try:
+                                    st.image(row['image'], use_container_width=True)
+                                except:
+                                    # Fallback if URL is broken
+                                    img_idx = index % len(FALLBACK_IMAGES)
+                                    st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
+                            else:
+                                # USE ROTATING WALLPAPERS
+                                # The modulo operator (%) ensures we cycle 0,1,2,3,4,5,0,1...
+                                img_idx = index % len(FALLBACK_IMAGES)
+                                st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
+
+                        # --- RIGHT COLUMN: TEXT ---
+                        with col_text:
+                            if row['label'] == "Positive":
+                                emoji = "🟢"
+                            elif row['label'] == "Negative":
+                                emoji = "🔴"
+                            else:
+                                emoji = "⚪"
+                                
+                            st.markdown(f"**[{emoji} {row['label']}]** \n[{row['title']}]({row['url']})")
+                            st.caption(f"Source: {row['source']} • {row['published']}")
+                            st.caption(f"FinBERT Confidence: {row['sentiment_score']:.4f}")
+
+                    st.divider()
             else:
-                st.warning("No news data available.")
+                st.info("No recent financial news found for this ticker (or API limit reached).")
         
         # --- TAB 3: AI Forecast ---
         with tab3:
@@ -263,10 +324,10 @@ if ticker:
                     st.markdown(f"Expected Change: <span style='color:{color}'>{change:.2f}%</span>", unsafe_allow_html=True)
 
                 else:
-                    st.info("👈 Click the button to train the AI and generate a forecast.")
+                    st.info("Click the button to train the AI and generate a forecast.")
 
     else:
         st.error(f"Could not find data for ticker '{ticker}'.")
 
 else:
-    st.info("👈 Enter a stock ticker to begin analysis.")
+    st.info("Enter a stock ticker to begin analysis.")

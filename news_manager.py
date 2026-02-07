@@ -1,106 +1,101 @@
 import requests
 import pandas as pd
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-import streamlit as st
 from datetime import datetime, timedelta
+import streamlit as st
+from sentiment_engine import predict_finbert_sentiment # Import our new brain
 
-def fetch_stock_news(ticker, api_key, limit=5):
+def fetch_finnhub_news(ticker, api_key):
     """
-    Fetches news metadata from NewsAPI.
+    Fetches company-specific news from Finnhub (Stocks/ETFs).
     """
-    # Get date for the last 7 days to ensure relevance
-    from_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    # Get dates: Today and 7 days ago
+    today = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     
-    # URL for NewsAPI
-    url = f"https://newsapi.org/v2/everything?q={ticker}&from={from_date}&sortBy=publishedAt&language=en&apiKey={api_key}"
+    # Finnhub Company News Endpoint
+    url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={start_date}&to={today}&token={api_key}"
     
     try:
         response = requests.get(url)
         data = response.json()
         
-        if data.get("status") != "ok":
-            st.error(f"Error fetching news: {data.get('message')}")
+        # Finnhub returns a list directly. If empty, return empty list.
+        if not data:
             return []
-        
-        # Return only the list of articles
-        return data.get("articles", [])[:limit]
+            
+        # Limit to top 10 most recent articles to save processing time
+        return data[:10]
         
     except Exception as e:
-        print(f"API Request Error: {e}")
+        print(f"Finnhub API Error: {e}")
         return []
 
-def filter_fake_news(articles):
+def process_news_with_finbert(articles):
     """
-    REQ-3.4.3-1: Fake News Detection Module (Layer 1).
-    Currently uses Source Credibility Verification (Whitelist approach).
+    Takes raw Finnhub articles, runs FinBERT, and returns a DataFrame.
     """
-    # A list of generally credible financial news domains
-    TRUSTED_SOURCES = [
-        "bloomberg.com", "reuters.com", "cnbc.com", "finance.yahoo.com", 
-        "wsj.com", "marketwatch.com", "forbes.com", "businessinsider.com",
-        "ft.com", "investopedia.com", "benzinga.com", "techcrunch.com"
-    ]
+    if not articles:
+        return pd.DataFrame()
     
-    verified_articles = []
+    news_data = []
+    headlines = []
     
+    # 1. Prepare data
     for article in articles:
-        # Check if the article has a valid source name and URL
-        if not article.get('source') or not article.get('url'):
-            continue
-
-        source_name = article['source'].get('name', '').lower()
-        url = article['url'].lower()
+        headline = article.get('headline', '')
+        summary = article.get('summary', '')
+        full_text = f"{headline}. {summary}"
+        headlines.append(full_text)
         
-        # Simple heuristic: Check if source is in our trusted list
-        # OR if we are desperate, we accept it (for now, we are strict)
-        is_trusted = any(trusted in url for trusted in TRUSTED_SOURCES)
+        pub_date = datetime.fromtimestamp(article['datetime']).strftime('%Y-%m-%d')
         
-        # For this prototype, if we find NO trusted news, we might show everything 
-        # but mark it. For now, let's append valid ones.
-        if is_trusted:
-            verified_articles.append(article)
-            
-    # If the filter is too strict and returns nothing, return raw articles 
-    # but normally we would warn the user.
-    return verified_articles if verified_articles else articles
-
-def analyze_sentiment(articles):
-    """
-    REQ-3.4.3-2: Applies VADER Sentiment Analysis.
-    """
-    analyzer = SentimentIntensityAnalyzer()
-    sentiment_data = []
-
-    for article in articles:
-        title = article.get('title', '')
-        description = article.get('description', '') or ""
-        
-        # Combine title and description for better accuracy
-        text_to_analyze = f"{title}. {description}"
-        
-        # Get sentiment scores
-        scores = analyzer.polarity_scores(text_to_analyze)
-        compound = scores['compound']
-        
-        # Categorize
-        if compound >= 0.05:
-            sentiment_label = "Positive"
-            color = "green"
-        elif compound <= -0.05:
-            sentiment_label = "Negative"
-            color = "red"
-        else:
-            sentiment_label = "Neutral"
-            color = "gray"
-            
-        sentiment_data.append({
-            "title": title,
-            "source": article['source']['name'],
-            "published": article['publishedAt'][:10],
-            "sentiment_score": compound,
-            "label": sentiment_label,
-            "color": color,
-            "url": article['url']
+        news_data.append({
+            'title': headline,
+            # --- NEW: Get the Image URL ---
+            'image': article.get('image', ''), 
+            # ------------------------------
+            'source': article.get('source', 'Finnhub'),
+            'url': article.get('url', '#'),
+            'published': pub_date,
+            'full_text': full_text
         })
         
-    return pd.DataFrame(sentiment_data)
+    # 2. Run FinBERT (Batch Processing)
+    if headlines:
+        # Get probabilities tensor
+        probs = predict_finbert_sentiment(headlines)
+        # FinBERT classes are: [positive, negative, neutral] usually at indices 0, 1, 2
+        # But ProsusAI/finbert output order is: [0: Positive, 1: Negative, 2: Neutral]
+        
+        # Let's map them to a single score (-1 to 1) for our chart
+        # Score = Prob(Pos) - Prob(Neg). Neutral doesn't pull the score.
+        sentiments = []
+        labels = []
+        
+        for i in range(len(probs)):
+            p_pos = probs[i][0].item()
+            p_neg = probs[i][1].item()
+            p_neu = probs[i][2].item()
+            
+            # Create a composite score
+            score = p_pos - p_neg
+            
+            # Assign Label
+            if score > 0.05:
+                label = "Positive"
+            elif score < -0.05:
+                label = "Negative"
+            else:
+                label = "Neutral"
+                
+            sentiments.append(score)
+            labels.append(label)
+            
+        # Add to dataframe
+        df = pd.DataFrame(news_data)
+        df['sentiment_score'] = sentiments
+        df['label'] = labels
+        
+        return df
+    
+    return pd.DataFrame()

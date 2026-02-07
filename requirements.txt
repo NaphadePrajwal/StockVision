@@ -8,3 +8,5 @@ vaderSentiment
 pandas_ta
 tensorflow
 scikit-learn
+transformers
+torch

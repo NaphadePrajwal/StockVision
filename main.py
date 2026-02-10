@@ -8,15 +8,69 @@ from feature_engine import add_technical_indicators # New Import
 from model_engine import StockPredictor
 import random 
 
+
 # --- Page Config (Dark Mode is default in Streamlit, but we can tweak layout) ---
 st.set_page_config(page_title="StockVision", layout="wide")
 
 st.title("⚡ StockVision: AI-Powered Market Forecaster")
 
+@st.cache_data
+def load_ticker_data():
+    """
+    Loads a dataset of ~8,000 US stock symbols (NASDAQ, NYSE, AMEX).
+    Source: GitHub raw dataset
+    """
+    # URL to a clean CSV of US Stock Symbols
+    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
+    
+    try:
+        # Load the CSV
+        df = pd.read_csv(url, header=None, names=["Ticker"])
+        
+        # Add some popular Indices manually (since they aren't usually in Stock lists)
+        indices = pd.DataFrame({
+            "Ticker": ["^GSPC", "^DJI", "^IXIC", "BTC-USD", "ETH-USD", "INR=X"]
+        })
+        
+        # Combine them
+        full_df = pd.concat([indices, df], ignore_index=True)
+        return full_df
+    except Exception as e:
+        # Fallback if internet is down
+        return pd.DataFrame({"Ticker": ["AAPL", "GOOGL", "MSFT", "TSLA"]})
+
+
+def get_currency_symbol(ticker):
+    """
+    Returns '₹' if the ticker is Indian, otherwise '$'.
+    """
+    # Check for Indian suffixes (.NS, .BO) or specific Indian indices
+    if ticker.endswith(".NS") or ticker.endswith(".BO") or ticker in ["^NSEI", "^BSESN", "INR=X"]:
+        return "₹"
+    else:
+        return "$"
+    
 # --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    ticker = st.text_input("Stock Ticker", "AAPL").upper()
+    # --- NEW: Dynamic Stock Loader ---
+    st.subheader("Asset Selection")
+    
+    with st.spinner("Loading Tickers..."):
+        ticker_df = load_ticker_data()
+        
+    # Create the dropdown
+    # We allow the user to type to search in this huge list
+    ticker = st.selectbox(
+        "Select Asset:",
+        ticker_df["Ticker"], # The list of 8000+ symbols
+        index=0  # Default to the first one (S&P 500)
+    )
+    
+    # Optional: Allow manual entry if they can't find it
+    use_manual = st.checkbox("I can't find my ticker")
+    if use_manual:
+        ticker = st.text_input("Enter Ticker Symbol manually:", "AAPL")
     period = st.selectbox("History Period", ["1y", "2y", "5y", "max"], index=1)
     st.info(" Tip: Try 'GOOGL', 'TSLA', or 'MSFT'")
 
@@ -66,11 +120,20 @@ if ticker:
                 st.caption(f" {company_info.get('sector', 'N/A')} | {company_info.get('industry', 'N/A')}")
         
         with col_head2:
-             # Display Current Price (Last Close)
+            # Display Current Price (Last Close)
             current_price = df['Close'].iloc[-1]
             prev_price = df['Close'].iloc[-2]
             delta = current_price - prev_price
-            st.metric("Current Price", f"${current_price:.2f}", f"{delta:.2f}")
+            
+            # --- NEW: Get Dynamic Currency Symbol ---
+            currency = get_currency_symbol(ticker)
+            
+            # Display with the correct symbol (₹ or $)
+            st.metric(
+                label="Current Price", 
+                value=f"{currency} {current_price:.2f}", 
+                delta=f"{delta:.2f}"
+            )
 
         # -- Main Content Area --
         # We use tabs to organize the view like a pro app
@@ -111,17 +174,37 @@ if ticker:
             st.plotly_chart(fig, use_container_width=True)
 
         with tab2:
-            st.subheader("Market Sentiment Analysis (FinBERT 🧠)")
-            st.caption("Using Deep Learning (FinBERT) to analyze financial news tone.")
+            st.subheader("🛡️ Verified News Intelligence")
+            st.caption("Pipeline: Fake News Detection AI ➔ FinBERT Sentiment AI")
 
             if sentiment_df is not None and not sentiment_df.empty:
-                # 1. Calculate Average Sentiment Score
-                avg_score = sentiment_df['sentiment_score'].mean()
                 
-                # 2. Display the Gauge/Meter
+                # --- STEP 1: THE FILTER (Data Separation) ---
+                # We split the dataframe into two parts: Trusted vs. Untrusted
+                clean_df = sentiment_df[sentiment_df['is_trusted'] == True]
+                fake_df = sentiment_df[sentiment_df['is_trusted'] == False]
+                
+                # Count how many fake articles we found
+                fake_count = len(fake_df)
+                
+                # Show a Security Status Message
+                if fake_count > 0:
+                    st.warning(f"⚠️ Security Alert: {fake_count} articles were flagged as 'Suspicious/Fake' and removed from the AI prediction.")
+                else:
+                    st.success("✅ Integrity Check Passed: All news sources appear legitimate.")
+                
+                # ---------------------------------------------
+
+                # --- STEP 2: CALCULATE SCORE (Using ONLY Clean Data) ---
+                if not clean_df.empty:
+                    # The AI ONLY sees this score. It never sees the fake news score.
+                    avg_score = clean_df['sentiment_score'].mean()
+                else:
+                    avg_score = 0.0 # Default to Neutral if all news is fake
+                
+                # Display the Gauge/Meter (Same as before)
                 col_sent1, col_sent2 = st.columns([1, 2])
                 with col_sent1:
-                    # Logic for the "Bullish/Bearish" text
                     if avg_score > 0.05:
                         st.success(f"🐂 Bullish (Score: {avg_score:.2f})")
                     elif avg_score < -0.05:
@@ -130,71 +213,67 @@ if ticker:
                         st.warning(f"😐 Neutral (Score: {avg_score:.2f})")
                 
                 with col_sent2:
-                    # Normalize score (-1 to 1) -> (0 to 1) for the progress bar
                     st.progress((avg_score + 1) / 2)
 
-                # 3. Display the News Articles (With Dynamic Images)
+                # --- STEP 3: DISPLAY NEWS CARDS (Visualizing the Block) ---
                 st.markdown("### 📰 Latest Financial News")
-
-                # --- CONFIGURATION ---
-                # Set this to TRUE if you want to ignore boring API logos and just show cool wallpapers
-                IGNORE_API_IMAGES = True
                 
-                # --- NEW: List of cool fallback images ---
-                # These are high-quality Unsplash images related to finance/tech
+                IGNORE_API_IMAGES = True 
                 FALLBACK_IMAGES = [
-                    "https://wallpaperaccess.com/full/1393720.jpg", # Stock Chart
-                    "https://wallpapercave.com/wp/wp6988199.jpg", # Bull Market
-                    "https://wallpaperaccess.com/full/3561071.png", # Analytics
-                    "https://wallpapercave.com/wp/wp10338352.jpg", # Data Screen
-                    "https://wallpaperaccess.com/full/6048844.png", # Finance Math
-                    "https://img.freepik.com/premium-photo/green-bull-market-run-upward-presents-uptrend-stock-market-financial-business-concept-generative-ai_1423-7210.jpg?w=2000"  # Business Graph
+                    "https://images.unsplash.com/photo-1611974765270-ca1258634369?auto=format&fit=crop&w=300&q=80", 
+                    "https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?auto=format&fit=crop&w=300&q=80", 
+                    "https://images.unsplash.com/photo-1535320903710-d9cf11350132?auto=format&fit=crop&w=300&q=80", 
+                    "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=300&q=80", 
+                    "https://images.unsplash.com/photo-1526304640152-d4619684e484?auto=format&fit=crop&w=300&q=80", 
+                    "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=300&q=80"
                 ]
 
-                # We use 'enumerate' to get the index (0, 1, 2...) so we can cycle through images
                 for index, row in sentiment_df.iterrows():
-                    with st.container():
+                     with st.container():
                         col_img, col_text = st.columns([1, 3])
                         
-                        # --- LEFT COLUMN: IMAGE ---
-                        with col_img:
-                            # Decide which image to show
-                            show_real_image = False
-                            
-                            # Only check for real image if we haven't disabled it
-                            if not IGNORE_API_IMAGES and row['image'] and row['image'].strip() != "":
-                                show_real_image = True
-
-                            if show_real_image:
-                                try:
-                                    st.image(row['image'], use_container_width=True)
-                                except:
-                                    # Fallback if URL is broken
-                                    img_idx = index % len(FALLBACK_IMAGES)
-                                    st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
-                            else:
-                                # USE ROTATING WALLPAPERS
-                                # The modulo operator (%) ensures we cycle 0,1,2,3,4,5,0,1...
+                        # --- LOGIC A: IF NEWS IS TRUSTED (Show Normal Card) ---
+                        if row['is_trusted']:
+                            with col_img:
+                                # Show Image (Real or Wallpaper)
                                 img_idx = index % len(FALLBACK_IMAGES)
-                                st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
+                                if not IGNORE_API_IMAGES and row['image'] and row['image'].strip() != "":
+                                    try:
+                                        st.image(row['image'], use_container_width=True)
+                                    except:
+                                        st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
+                                else:
+                                    st.image(FALLBACK_IMAGES[img_idx], use_container_width=True)
 
-                        # --- RIGHT COLUMN: TEXT ---
-                        with col_text:
-                            if row['label'] == "Positive":
-                                emoji = "🟢"
-                            elif row['label'] == "Negative":
-                                emoji = "🔴"
-                            else:
-                                emoji = "⚪"
+                            with col_text:
+                                if row['label'] == "Positive": emoji = "🟢"
+                                elif row['label'] == "Negative": emoji = "🔴"
+                                else: emoji = "⚪"
+                                    
+                                st.markdown(f"**[{emoji} {row['label']}]** \n[{row['title']}]({row['url']})")
                                 
-                            st.markdown(f"**[{emoji} {row['label']}]** \n[{row['title']}]({row['url']})")
-                            st.caption(f"Source: {row['source']} • {row['published']}")
-                            st.caption(f"FinBERT Confidence: {row['sentiment_score']:.4f}")
+                                if pd.notna(row['summary']) and row['summary'] != "":
+                                    st.caption(f"{row['summary'][:200]}...")
+                                
+                                st.caption(f"Source: {row['source']} • {row['published']}")
+                                st.caption(f"FinBERT Confidence: {row['sentiment_score']:.4f}")
 
-                    st.divider()
+                        # --- LOGIC B: IF NEWS IS FAKE (Show "Blocked" Card) ---
+                        else:
+                            with col_img:
+                                # Show a "Warning" Image
+                                st.image("https://cdn-icons-png.flaticon.com/512/564/564619.png", width=80) 
+                            
+                            with col_text:
+                                st.error("🚫 BLOCKED: SUSPICIOUS SOURCE DETECTED")
+                                st.markdown(f"~~{row['title']}~~") # Strikethrough text
+                                st.caption(f"Reason: AI detected potential fake news patterns ({row['fake_confidence']*100:.1f}% confidence).")
+                                st.caption("Action: This article was removed from the price prediction model.")
+
+                     st.divider()
             else:
-                st.info("No recent financial news found for this ticker (or API limit reached).")
-        
+                st.info("No recent financial news found for this ticker.")
+
         # --- TAB 3: AI Forecast ---
         with tab3:
             st.subheader("🤖 AI Price Prediction (LSTM)")
